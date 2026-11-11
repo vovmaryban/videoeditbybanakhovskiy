@@ -7,6 +7,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // user data, whisper binaries and renders change while the studio runs: watching them crashes Vite on Windows (EBUSY)
+    watch: { ignored: ['**/data/**', '**/tools/**', '**/dist/**'] },
     proxy: {
       '/api': API,
       '/media': API,

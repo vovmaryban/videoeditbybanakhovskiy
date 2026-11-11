@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { Project } from '../src/remotion/types';
-import { DEFAULT_STYLE } from '../src/remotion/presets';
-import { buildClips, findSpeech, readWav, SR, windows, writeWav } from './cuts';
+import type { Project, Word } from '../src/remotion/types';
+import { DEFAULT_STYLE, normalizeStyle } from '../src/remotion/presets';
+import { buildClips, findSpeech, packWindows, readWav, snapWords, SR, suspiciousRuns, windows, writeWav } from './cuts';
 import { ffmpeg, probe } from './ffmpeg';
 import { PROJECTS, projectDir } from './paths';
 import { transcribeWindows } from './whisper';
@@ -23,7 +23,7 @@ export const get = (id: string): Project | null => {
   const file = path.join(projectDir(id), 'project.json');
   if (!fs.existsSync(file)) return null;
   const p = JSON.parse(fs.readFileSync(file, 'utf8')) as Project;
-  p.style = { ...DEFAULT_STYLE, ...p.style };
+  p.style = normalizeStyle(p.style);
   cache.set(id, p);
   return p;
 };
@@ -88,12 +88,35 @@ export const processProject = async (id: string, sourceFile: string) => {
     const wdir = path.join(dir, 'asr');
     fs.rmSync(wdir, { recursive: true, force: true });
     fs.mkdirSync(wdir);
-    const wins = windows(speech).map((w, i) => {
-      const file = path.join(wdir, `w${String(i).padStart(3, '0')}.wav`);
+    const toFiles = (list: { start: number; end: number }[], prefix: string) => list.map((w, i) => {
+      const file = path.join(wdir, `${prefix}${String(i).padStart(3, '0')}.wav`);
       writeWav(file, pcm.subarray(Math.floor(w.start * SR), Math.min(pcm.length, Math.ceil(w.end * SR))));
       return { file, offset: w.start, seconds: w.end - w.start };
     });
-    const words = wins.length ? await transcribeWindows(wins, p.language, (x) => step(p, 'Розпізнаю мову', x)) : [];
+    const t0 = Date.now();
+    let words: Word[] = [];
+    let passInfo = '';
+    if ((p.asrMode ?? 'fast') === 'precise') {
+      const wins = toFiles(windows(speech), 'w');
+      words = wins.length ? await transcribeWindows(wins, p.language, (x) => step(p, 'Розпізнаю мову', x)) : [];
+      passInfo = `${wins.length} вікон по одній фразі`;
+    } else {
+      // pass 1: big windows (few encoder runs)
+      const big = toFiles(packWindows(speech), 'a');
+      words = big.length ? snapWords(speech, await transcribeWindows(big, p.language, (x) => step(p, 'Розпізнаю мову', x * 0.55))) : [];
+      // pass 2: only phrases that look wrong (merged retakes, missing words) + their neighbours
+      const bad = suspiciousRuns(speech, words);
+      if (bad.length) {
+        const runs = bad.map((k) => speech[k]);
+        const small = toFiles(windows(runs), 'b');
+        const fixed = small.length ? await transcribeWindows(small, p.language, (x) => step(p, 'Перевіряю сумнівні фрази', 0.55 + x * 0.45)) : [];
+        const inBad = (t: number) => runs.some((r) => t >= r.start - 0.05 && t <= r.end + 0.05);
+        words = [...words.filter((w) => !inBad((w.start + w.end) / 2)), ...fixed].sort((a, b) => a.start - b.start);
+      }
+      passInfo = `${big.length} великих вікон + ${bad.length} фраз повторно`;
+    }
+    p.asrSeconds = +((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`[${p.id}] розпізнавання: ${p.asrSeconds} с (${passInfo}) на ${info.duration.toFixed(1)} с запису`);
     p.words = words;
     p.clips = buildClips(speech, words);
     fs.writeFileSync(path.join(dir, 'words.auto.json'), JSON.stringify(words));

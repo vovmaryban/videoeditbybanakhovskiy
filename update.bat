@@ -14,6 +14,9 @@ git pull
 if errorlevel 1 goto :err
 call npm install --no-audit --no-fund
 if errorlevel 1 goto :err
+echo  Перевіряю розпізнавання мови (за потреби докачає швидшу версію)...
+call npm run setup:whisper
+if errorlevel 1 goto :err
 echo.
 echo  Оновлено. Твої проєкти в папці data не чіпались. Запускай start.bat
 pause

@@ -34,7 +34,9 @@ export const FF_ENV: NodeJS.ProcessEnv = COMPOSITOR && !process.env.FFMPEG_PATH
 
 // whisper.cpp
 export const WHISPER_VERSION = '1.8.2';
-export const WHISPER_DIR = path.join(TOOLS, 'whisper');
+// Windows: the OpenBLAS build (≈20–25% faster encoder on CPU than the plain one, same text). Old plain installs still work.
+export const WHISPER_DIR = path.join(TOOLS, IS_WIN ? 'whisper-blas' : 'whisper');
+const OLD_WHISPER_DIR = path.join(TOOLS, 'whisper');
 export const MODELS_DIR = path.join(TOOLS, 'models');
 export const DEFAULT_MODEL = process.env.WHISPER_MODEL ?? 'ggml-large-v3-turbo-q5_0.bin';
 
@@ -52,7 +54,9 @@ export const findFile = (dir: string, names: string[]): string | null => {
   return null;
 };
 
-export const whisperBinary = () => process.env.WHISPER_BIN ?? findFile(WHISPER_DIR, IS_WIN ? ['whisper-cli.exe'] : ['whisper-cli']);
+const WHISPER_EXE = IS_WIN ? ['whisper-cli.exe'] : ['whisper-cli'];
+export const whisperBinary = () => process.env.WHISPER_BIN ?? findFile(WHISPER_DIR, WHISPER_EXE) ?? findFile(OLD_WHISPER_DIR, WHISPER_EXE);
+export const whisperFastBinary = () => process.env.WHISPER_BIN ?? findFile(WHISPER_DIR, WHISPER_EXE);
 export const whisperModel = () => {
   const p = process.env.WHISPER_MODEL_PATH ?? path.join(MODELS_DIR, DEFAULT_MODEL);
   return fs.existsSync(p) ? p : null;

@@ -100,6 +100,91 @@ export const windows = (speech: { start: number; end: number }[]) => {
   return out.filter((w) => w.end - w.start >= 0.45).map((w) => ({ start: Math.max(0, w.start - 0.1), end: w.end + 0.1 }));
 };
 
+// FAST mode, pass 1: consecutive phrases packed into windows of up to ~28 s (one 30 s encoder pass each),
+// split only in pauses. Retakes inside one window may get merged by whisper: pass 2 catches those.
+export const packWindows = (speech: { start: number; end: number }[], maxLen = 28) => {
+  const out: { start: number; end: number }[] = [];
+  for (const s of speech) {
+    const last = out[out.length - 1];
+    if (last && s.end - last.start <= maxLen) last.end = s.end;
+    else out.push({ start: s.start, end: s.end });
+  }
+  return out.filter((w) => w.end - w.start >= 0.45).map((w) => ({ start: Math.max(0, w.start - 0.1), end: w.end + 0.1 }));
+};
+
+const nearestRun = (speech: { start: number; end: number }[], t: number) => {
+  let best = 0;
+  let bestD = Infinity;
+  speech.forEach((s, k) => {
+    const d = t < s.start ? s.start - t : t > s.end ? t - s.end : 0;
+    if (d < bestD) { bestD = d; best = k; }
+  });
+  return best;
+};
+
+// Words whose middle landed in a pause (timing drift in long windows) are pulled into the nearest phrase,
+// otherwise they would vanish from captions and cuts.
+// Order is kept: a stray word takes the head of the next word (or the tail of the previous one) instead of the phrase edge.
+export const snapWords = (speech: { start: number; end: number }[], words: Word[]): Word[] => {
+  if (!speech.length) return words;
+  const out = words.map((w) => ({ ...w }));
+  const inside = (w: Word) => {
+    const mid = (w.start + w.end) / 2;
+    return speech.some((s) => mid >= s.start && mid <= s.end);
+  };
+  out.forEach((w, i) => {
+    if (inside(w)) return;
+    const mid = (w.start + w.end) / 2;
+    const s = speech[nearestRun(speech, mid)];
+    const forward = mid < s.start; // belongs to the phrase after the pause
+    const nb = out[forward ? i + 1 : i - 1];
+    if (nb && inside(nb) && (forward ? nb.start < s.end : nb.end > s.start)) {
+      const len = nb.end - nb.start;
+      if (forward) { w.start = Math.max(nb.start, s.start); w.end = w.start + len * 0.35; nb.start = w.end; }
+      else { w.end = Math.min(nb.end, s.end); w.start = w.end - len * 0.35; nb.end = w.start; }
+    } else {
+      const len = Math.min(w.end - w.start, Math.max(0.08, s.end - s.start));
+      w.start = forward ? s.start : s.end - len;
+      w.end = w.start + len;
+    }
+    w.start = +w.start.toFixed(3);
+    w.end = +w.end.toFixed(3);
+  });
+  return out;
+};
+
+// FAST mode, pass 2 selection: phrases where pass 1 found too few words for their length
+// (typical when whisper merged two takes or skipped one), or smeared word timings. Neighbours included.
+// Measured on a real retake test: when whisper merges two takes it keeps one copy of the text and stretches
+// single words over 2–3 s; density is judged against this speaker's own pace (slow talkers are not flagged).
+export const suspiciousRuns = (speech: { start: number; end: number }[], words: Word[]) => {
+  const count = speech.map(() => 0);
+  const smeared = speech.map(() => false);
+  for (const w of words) {
+    const k = nearestRun(speech, (w.start + w.end) / 2);
+    count[k]++;
+    if (w.end - w.start > 2.0) smeared[k] = true;
+  }
+  const dens = speech.map((s, k) => count[k] / Math.max(0.01, s.end - s.start)).filter((_, k) => speech[k].end - speech[k].start >= 1);
+  const median = dens.length ? [...dens].sort((a, b) => a - b)[Math.floor(dens.length / 2)] : 2;
+  const bad = new Set<number>();
+  speech.forEach((s, k) => {
+    const dur = s.end - s.start;
+    const empty = count[k] === 0 && dur >= 0.8;
+    const sparse = dur >= 1.2 && count[k] / dur < 0.45 * median;
+    if (!(empty || sparse || smeared[k])) return;
+    bad.add(k);
+    // a take's twin is usually right next to it: re-check close, phrase-sized neighbours too
+    for (const j of [k - 1, k + 1]) {
+      const n = speech[j];
+      if (!n) continue;
+      const gap = j < k ? s.start - n.end : n.start - s.end;
+      if (gap < 1.5 && n.end - n.start < 10) bad.add(j);
+    }
+  });
+  return [...bad].sort((a, b) => a - b);
+};
+
 const stem = (w: string) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 5);
 
 // Clips from speech runs; earlier takes of a phrase that is repeated soon after are switched off.

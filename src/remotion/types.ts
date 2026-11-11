@@ -1,4 +1,6 @@
 // Shared data model: used by the UI, the Remotion composition and the server.
+import type { ColorStyle } from './color';
+export type { ColorStyle } from './color';
 
 export type Word = {
   text: string;
@@ -15,9 +17,15 @@ export type Clip = {
   reason?: 'retake' | 'noise' | 'manual';
 };
 
-export type CaptionAnimation = 'none' | 'fade' | 'pop' | 'slide-up' | 'blur' | 'drop';
-export type WordMode = 'static' | 'reveal' | 'highlight' | 'box' | 'karaoke' | 'pop-active' | 'underline' | 'marker';
-export type CaptionBg = 'none' | 'plate' | 'line-plates' | 'glass';
+export type CaptionAnimation = 'none' | 'fade' | 'pop' | 'slide-up' | 'blur' | 'drop' | 'glitch' | 'zoom-out' | 'wipe' | 'stamp';
+export type WordMode =
+  | 'static' | 'reveal' | 'highlight' | 'box' | 'karaoke' | 'pop-active' | 'underline' | 'marker'
+  | 'blur-in' // upcoming words are ghosted + blurred, each sharpens when spoken (tenfoldmarc)
+  | 'typewriter' // letters appear one by one, with a cursor
+  | 'rise'; // each word slides up from a mask when spoken
+export type CaptionBg = 'none' | 'plate' | 'line-plates' | 'glass' | 'word-tags' | 'brush';
+// How accent words (★ or automatic) are shown
+export type AccentStyle = 'color' | 'box' | 'marker' | 'font' | 'big' | 'glow';
 
 export type CaptionStyle = {
   enabled: boolean;
@@ -32,7 +40,7 @@ export type CaptionStyle = {
   accent: string; // accent words + highlight colour
   activeColor: string; // colour of the spoken word (highlight / karaoke / pop-active)
   futureColor: string; // karaoke: words not yet spoken
-  boxColor: string; // box / marker background behind the active word
+  boxColor: string; // box / marker background behind the active or accent word
   bg: CaptionBg;
   bgColor: string;
   bgOpacity: number;
@@ -48,25 +56,52 @@ export type CaptionStyle = {
   maxChars: number;
   animation: CaptionAnimation;
   wordMode: WordMode;
-};
-
-export type ColorStyle = {
-  preset: string;
-  brightness: number; // 1 = unchanged
-  contrast: number;
-  saturation: number;
-  warmth: number; // -1 cool .. +1 warm
-  fade: number; // 0..1 lifted blacks
-  vignette: number; // 0..1
-  grain: number; // 0..1
-  tint: string | null; // overlay colour (soft-light)
-  tintAmount: number;
+  // --- added in stage 2 (older projects get defaults) ---
+  align: 'center' | 'left' | 'right';
+  x: number; // horizontal anchor 0..1 (centre for centre-aligned text)
+  rotate: number; // degrees
+  accentStyle: AccentStyle;
+  autoAccent: 'off' | 'longest' | 'last'; // pick one word per caption automatically
+  accentFont: string | null; // second font for accent words (script / serif mix)
+  accentItalic: boolean;
+  accentWeight: number;
+  accentScale: number; // accent word size multiplier
+  accentUpper: 'same' | 'upper' | 'lower';
+  accentInk: string; // text colour inside an accent box / marker
+  tiers: boolean; // two-tier: accent word on its own big line (small lead + BIG keyword)
 };
 
 export type CameraStyle = {
   mode: 'none' | 'alternate' | 'push' | 'punch';
   amount: number; // extra scale, e.g. 0.1 = 110%
   focusY: number; // 0..1 vertical point zooms keep in place (face height)
+  accentPunch?: number; // quick zoom on accent words, 0 = off
+};
+
+// Effects that belong to the editing style (never colour)
+export type CutTransition = 'none' | 'flash' | 'zoom-blur' | 'whip' | 'glitch' | 'blur' | 'shake' | 'dip';
+export type FrameLayout = 'full' | 'card' | 'arch' | 'blob' | 'split-top' | 'split-bottom' | 'circle';
+export type FramePattern = 'plain' | 'dots' | 'grid' | 'gradient' | 'paper';
+export type FxStyle = {
+  cut: CutTransition;
+  cutStrength: number; // 0..1
+  frame: FrameLayout; // how the video sits in the 9:16 canvas
+  frameBg: string; // background colour around a framed video
+  frameBg2: string; // second colour (gradient / grid lines)
+  framePattern: FramePattern;
+  frameBorder: string | null; // border colour of the video frame
+  letterbox: number; // 0..0.2 cinematic bars
+  shakeOnAccent: boolean;
+};
+
+export type HeadlineStyleId = 'top-caps' | 'black-plates' | 'label' | 'kicker-serif' | 'condensed-script' | 'yellow-tech' | 'swiss-lime' | 'pixel' | 'red-brush' | 'neon-glow';
+export type HeadlineStyle = {
+  enabled: boolean;
+  text: string; // main line(s), \n = new line
+  kicker: string; // small line above / script overlay
+  style: HeadlineStyleId;
+  y: number;
+  until: number; // seconds it stays on screen, 0 = whole video
 };
 
 export type MusicStyle = {
@@ -76,9 +111,12 @@ export type MusicStyle = {
 };
 
 export type ProjectStyle = {
+  look?: string; // id of the last applied look (informational)
   captions: CaptionStyle;
   color: ColorStyle;
   camera: CameraStyle;
+  fx: FxStyle;
+  headline: HeadlineStyle;
   music: MusicStyle;
   voiceVolume: number;
 };
@@ -94,6 +132,8 @@ export type Project = {
   progress?: number; // 0..1
   error?: string;
   language: string;
+  asrMode?: 'fast' | 'precise'; // fast: big windows + re-check of suspicious phrases; precise: every phrase alone
+  asrSeconds?: number; // how long the last recognition took
   fps: number;
   width: number;
   height: number;
@@ -111,6 +151,7 @@ export type FontEntry = {
   weights: [number, number];
   italic?: string; // url of the italic file
   user?: boolean;
+  kind?: 'sans' | 'serif' | 'script' | 'display' | 'mono';
 };
 
 export type ReelProps = {
@@ -119,4 +160,5 @@ export type ReelProps = {
   fonts: FontEntry[];
   musicSrc: string | null;
   showSafeZones?: boolean;
+  colorBypass?: boolean; // "before" view in the colour tab
 };

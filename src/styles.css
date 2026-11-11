@@ -16,7 +16,10 @@
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text); font: 14px/1.45 'UI', system-ui, sans-serif; }
-button, input, select { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
+.row-ctl select, .row-ctl textarea, .row-ctl input:not([type]) { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; min-width: 0; flex: 1; max-width: 100%; }
+.row-ctl textarea { resize: vertical; width: 100%; }
+button.ghost.on { color: var(--acc); border-color: var(--acc); }
 button { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 12px; cursor: pointer; }
 button:hover { border-color: #3c3c48; }
 button.primary { background: var(--acc); border-color: var(--acc); color: #fff; font-weight: 600; }

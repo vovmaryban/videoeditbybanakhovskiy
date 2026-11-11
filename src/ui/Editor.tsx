@@ -4,23 +4,42 @@ import { api, type RenderJob } from '../api';
 import { go } from '../App';
 import { Reel } from '../remotion/Reel';
 import { BUILTIN_FONTS } from '../remotion/fonts';
-import { CAMERA_PRESETS, CAPTION_PRESETS, COLOR_PRESETS, LOOKS, type Preset } from '../remotion/presets';
+import { ADJUST_KEYS, COLOR_FILTERS, ZERO_ADJUST, type ColorAdjust } from '../remotion/color';
+import { HEADLINE_STYLES } from '../remotion/Headline';
+import { applyLook, CAMERA_PRESETS, CAPTION_PRESETS, CUT_PRESETS, FRAME_PRESETS, LOOKS, normalizeStyle, type Preset } from '../remotion/presets';
 import { buildPages, buildTimeline, srcToOut } from '../remotion/timeline';
-import type { CaptionStyle, Clip, FontEntry, Project, ProjectStyle, ReelProps, Word } from '../remotion/types';
+import type { CaptionStyle, Clip, ColorStyle, FontEntry, FxStyle, HeadlineStyle, Project, ProjectStyle, ReelProps, Word } from '../remotion/types';
 import { Color, Row, Section, Segmented, Slider, Swatches, Toggle } from './controls';
 import { VariantGrid, type Variant } from './VariantGrid';
 
-type Tab = 'looks' | 'captions' | 'color' | 'camera' | 'music' | 'text' | 'export';
-const TABS: [Tab, string][] = [['looks', 'Стилі'], ['captions', 'Субтитри'], ['color', 'Колір'], ['camera', 'Камера'], ['music', 'Музика'], ['text', 'Текст і склейки'], ['export', 'Експорт']];
-const PALETTE = ['#FFFFFF', '#111111', '#FFD60A', '#3EE07A', '#E8202A', '#FF5A36', '#7C3AED', '#00E5FF', '#F2C46D', '#FF4FA3'];
+type Tab = 'looks' | 'captions' | 'fx' | 'color' | 'camera' | 'music' | 'text' | 'export';
+const TABS: [Tab, string][] = [['looks', 'Стилі'], ['captions', 'Субтитри'], ['fx', 'Ефекти'], ['color', 'Колір'], ['camera', 'Камера'], ['music', 'Музика'], ['text', 'Текст і склейки'], ['export', 'Експорт']];
+const PALETTE = ['#FFFFFF', '#111111', '#FFD60A', '#3EE07A', '#E8202A', '#FF5A36', '#7C3AED', '#00E5FF', '#F2C46D', '#FF4FA3', '#F1EBDD', '#D8F53C', '#CFE3FF', '#5B0F1A'];
+const BG_PALETTE = ['#FFFFFF', '#F3F1F4', '#F1EFEA', '#111111', '#4A0710', '#6F7B3B', '#1E3A2A', '#0B2A66', '#F5C928', '#E8E6F8'];
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const fmtT = (t: number) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+
+// CapCut-like adjustment sliders: label, range, how to show the number
+const ADJUST_UI: Record<keyof ColorAdjust, { label: string; min: number; max: number }> = {
+  exposure: { label: 'Експозиція', min: -1, max: 1 },
+  brightness: { label: 'Яскравість', min: -1, max: 1 },
+  contrast: { label: 'Контраст', min: -1, max: 1 },
+  highlights: { label: 'Світлі ділянки', min: -1, max: 1 },
+  shadows: { label: 'Тіні', min: -1, max: 1 },
+  saturation: { label: 'Насиченість', min: -1, max: 1 },
+  temperature: { label: 'Температура', min: -1, max: 1 },
+  tint: { label: 'Відтінок (зелений ↔ пурпур)', min: -1, max: 1 },
+  fade: { label: 'Вицвітання', min: 0, max: 1 },
+  vignette: { label: 'Віньєтка', min: 0, max: 1 },
+  grain: { label: 'Зерно', min: 0, max: 1 },
+};
 
 export const Editor: React.FC<{ id: string }> = ({ id }) => {
   const [project, setProject] = useState<Project | null>(null);
   const [fonts, setFonts] = useState<FontEntry[]>(BUILTIN_FONTS);
   const [tab, setTab] = useState<Tab>('looks');
   const [safe, setSafe] = useState(true);
+  const [before, setBefore] = useState(false);
   const [saving, setSaving] = useState<'idle' | 'dirty' | 'saved'>('idle');
   const player = useRef<PlayerRef>(null);
   const timer = useRef<number | undefined>(undefined);
@@ -31,7 +50,7 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
     let alive = true;
     const load = () => api.get(id).then((p) => {
       if (!alive) return;
-      setProject((old) => (old && old.status === 'ready' ? old : p));
+      setProject((old) => (old && old.status === 'ready' ? old : { ...p, style: normalizeStyle(p.style) }));
       if (p.status !== 'ready' && p.status !== 'error') setTimeout(load, 1500);
     }).catch(() => go(''));
     load();
@@ -39,10 +58,7 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
     return () => { alive = false; };
   }, [id]);
 
-  const update = useCallback((patch: Partial<Project>) => {
-    setProject((p) => (p ? { ...p, ...patch } : p));
-    pending.current = { ...pending.current, ...patch };
-    setSaving('dirty');
+  const flush = useCallback(() => {
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
       const body = pending.current;
@@ -51,20 +67,23 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
     }, 500);
   }, [id]);
 
+  const update = useCallback((patch: Partial<Project>) => {
+    setProject((p) => (p ? { ...p, ...patch } : p));
+    pending.current = { ...pending.current, ...patch };
+    setSaving('dirty');
+    flush();
+  }, [flush]);
+
   const setStyle = useCallback((fn: (s: ProjectStyle) => ProjectStyle) => {
     setProject((p) => {
       if (!p) return p;
       const style = fn(p.style);
       pending.current = { ...pending.current, style };
       setSaving('dirty');
-      window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => {
-        const body = pending.current; pending.current = {};
-        api.patch(id, body).then(() => setSaving('saved')).catch(() => setSaving('dirty'));
-      }, 500);
+      flush();
       return { ...p, style };
     });
-  }, [id]);
+  }, [flush]);
 
   const preview = project ? `/media/${project.id}/preview.mp4` : '';
   const musicSrc = project?.style.music.file ? `/media/${project.id}/${encodeURIComponent(project.style.music.file)}` : null;
@@ -76,6 +95,12 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
     const p = pages.filter((x) => x.words.length >= 2).sort((a, b) => Math.abs(a.o0 - target) - Math.abs(b.o0 - target))[0];
     return p ? p.o0 + 6 : Math.round(target);
   }, [project?.words, timeline]);
+  // tiles for transitions start a bit before a cut, so hovering shows the effect
+  const cutFrame = useMemo(() => {
+    if (!timeline) return 0;
+    const c = timeline.pieces.slice(1).map((p) => p.from).find((f) => f > 20) ?? sampleFrame + 12;
+    return Math.max(0, c - 14);
+  }, [timeline, sampleFrame]);
 
   if (!project) return <div className="center muted">Завантаження…</div>;
   if (project.status === 'error') {
@@ -105,32 +130,31 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
   const props = (style: ProjectStyle, opts: Partial<ReelProps> = {}): ReelProps => ({
     src: preview, project: { words: project.words, clips: project.clips, fps: project.fps, style }, fonts, musicSrc: null, ...opts,
   });
-  const mainProps = props(project.style, { musicSrc, showSafeZones: safe });
+  const mainProps = props(project.style, { musicSrc, showSafeZones: safe, colorBypass: before });
   const seekSrc = (t: number) => {
     const f = srcToOut(timeline!.pieces, t, project.fps);
     if (f !== null) player.current?.seekTo(f);
   };
 
-  const grid = <T,>(presets: Preset<T>[], apply: (s: ProjectStyle, v: T) => ProjectStyle, current: (s: ProjectStyle) => unknown) => {
+  const grid = <T,>(presets: Preset<T>[], apply: (s: ProjectStyle, v: T) => ProjectStyle, current: (s: ProjectStyle) => unknown, frame = sampleFrame) => {
     const variants: Variant[] = presets.map((pr) => ({ id: pr.id, name: pr.name, tag: pr.tag, props: props(apply(project.style, pr.value)) }));
     const sel = presets.find((pr) => same(current(apply(project.style, pr.value)), current(project.style)))?.id ?? null;
-    return <VariantGrid variants={variants} selected={sel} frame={sampleFrame} duration={duration} onPick={(pid) => setStyle((s) => apply(s, presets.find((x) => x.id === pid)!.value))} />;
+    return <VariantGrid variants={variants} selected={sel} frame={frame} duration={duration} onPick={(pid) => setStyle((s) => apply(s, presets.find((x) => x.id === pid)!.value))} />;
   };
 
   const capt = project.style.captions;
   const setCap = (patch: Partial<CaptionStyle>) => setStyle((s) => ({ ...s, captions: { ...s.captions, ...patch } }));
   const col = project.style.color;
-  const setCol = (patch: Partial<ProjectStyle['color']>) => setStyle((s) => ({ ...s, color: { ...s.color, ...patch, preset: 'custom' } }));
+  const setCol = (patch: Partial<ColorStyle>) => setStyle((s) => ({ ...s, color: { ...s.color, ...patch } }));
+  const fxs = project.style.fx;
+  const setFx = (patch: Partial<FxStyle>) => setStyle((s) => ({ ...s, fx: { ...s.fx, ...patch } }));
+  const hl = project.style.headline;
+  const setHl = (patch: Partial<HeadlineStyle>) => setStyle((s) => ({ ...s, headline: { ...s.headline, ...patch } }));
 
-  const looks: Preset<ProjectStyle>[] = LOOKS.map((l) => ({
-    id: l.id, name: l.name,
-    value: {
-      ...project.style,
-      captions: CAPTION_PRESETS.find((x) => x.id === l.captions)!.value,
-      color: COLOR_PRESETS.find((x) => x.id === l.color)!.value,
-      camera: CAMERA_PRESETS.find((x) => x.id === l.camera)!.value,
-    },
-  }));
+  const looks: Preset<ProjectStyle>[] = LOOKS.map((l) => ({ id: l.id, name: l.name, tag: l.tag, value: applyLook(project.style, l) }));
+  const capApply = (s: ProjectStyle, v: CaptionStyle) => ({ ...s, captions: { ...v, enabled: true } });
+  const capCurrent = (s: ProjectStyle) => ({ ...s.captions, enabled: true });
+  const pct = (v: number) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}`;
 
   return (
     <div className="editor">
@@ -170,15 +194,18 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
           </nav>
           <div className="panel-body">
             {tab === 'looks' && (
-              <Section title="Готові стилі" right={<span className="muted small">наведи — програє, клік — застосує</span>}>
-                {grid(looks, (_s, v) => v, (s) => [s.captions, s.color, s.camera])}
+              <Section title="Стилі монтажу" right={<span className="muted small">субтитри + камера + ефекти · колір не змінюється</span>}>
+                {grid(looks, (_s, v) => v, (s) => [s.captions, s.camera, s.fx, s.headline.style])}
               </Section>
             )}
 
             {tab === 'captions' && (
               <>
-                <Section title="Стиль субтитрів" right={<Toggle label="" value={capt.enabled} onChange={(v) => setCap({ enabled: v })} />}>
-                  {grid(CAPTION_PRESETS, (s, v) => ({ ...s, captions: { ...v, y: s.captions.y, enabled: true } }), (s) => ({ ...s.captions, y: 0, enabled: true }))}
+                <Section title="З твоїх референсів" right={<Toggle label="" value={capt.enabled} onChange={(v) => setCap({ enabled: v })} />}>
+                  {grid(CAPTION_PRESETS.filter((p) => p.group === 'refs'), capApply, capCurrent)}
+                </Section>
+                <Section title="Класичні">
+                  {grid(CAPTION_PRESETS.filter((p) => p.group === 'classic'), capApply, capCurrent)}
                 </Section>
                 <Section title="Шрифт">
                   <div className="fonts">
@@ -190,22 +217,48 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
                   <Slider label="Товщина" value={capt.weight} min={100} max={1000} step={50} onChange={(weight) => setCap({ weight })} />
                   <Slider label="Розмір" value={capt.size} min={24} max={160} onChange={(size) => setCap({ size })} />
                   <Slider label="Міжлітерний" value={capt.letterSpacing} min={-0.05} max={0.2} step={0.005} onChange={(letterSpacing) => setCap({ letterSpacing })} fmt={(v) => v.toFixed(3)} />
+                  <Slider label="Міжрядковий" value={capt.lineHeight} min={0.8} max={1.6} step={0.01} onChange={(lineHeight) => setCap({ lineHeight })} fmt={(v) => v.toFixed(2)} />
                   <Toggle label="ВЕЛИКІ ЛІТЕРИ" value={capt.uppercase} onChange={(uppercase) => setCap({ uppercase })} />
                   <Toggle label="Курсив" value={capt.italic} onChange={(italic) => setCap({ italic })} />
                 </Section>
                 <Section title="Анімація">
                   <Segmented label="Поява" value={capt.animation} onChange={(animation) => setCap({ animation })}
-                    options={[['none', 'без'], ['fade', 'проява'], ['pop', 'поп'], ['slide-up', 'знизу'], ['blur', 'розмиття'], ['drop', 'падіння']]} />
+                    options={[['none', 'без'], ['fade', 'проява'], ['pop', 'поп'], ['slide-up', 'знизу'], ['blur', 'розмиття'], ['drop', 'падіння'], ['zoom-out', 'зум'], ['wipe', 'шторка'], ['stamp', 'штамп'], ['glitch', 'глітч']]} />
                   <Segmented label="Слова" value={capt.wordMode} onChange={(wordMode) => setCap({ wordMode })}
-                    options={[['static', 'разом'], ['reveal', 'по одному'], ['highlight', 'підсвітка'], ['karaoke', 'караоке'], ['pop-active', 'стрибок'], ['box', 'плашка'], ['marker', 'маркер'], ['underline', 'риска']]} />
-                  <Slider label="Слів на екрані" value={capt.maxWords} min={1} max={7} onChange={(maxWords) => setCap({ maxWords, maxChars: Math.max(capt.maxChars, maxWords * 6) })} />
+                    options={[['static', 'разом'], ['reveal', 'по одному'], ['blur-in', 'з розмиття'], ['rise', 'знизу'], ['typewriter', 'машинка'], ['highlight', 'підсвітка'], ['karaoke', 'караоке'], ['pop-active', 'стрибок'], ['box', 'плашка'], ['marker', 'маркер'], ['underline', 'риска']]} />
+                  <Slider label="Слів на екрані" value={capt.maxWords} min={1} max={8} onChange={(maxWords) => setCap({ maxWords, maxChars: Math.max(capt.maxChars, maxWords * 6) })} />
                   <Slider label="Символів у рядку" value={capt.maxChars} min={6} max={40} onChange={(maxChars) => setCap({ maxChars })} />
+                </Section>
+                <Section title="Ключові слова" right={<span className="muted small">★ у «Текст і склейки» або автоматично</span>}>
+                  <Segmented label="Автовибір" value={capt.autoAccent} onChange={(autoAccent) => setCap({ autoAccent })} options={[['off', 'лише ★'], ['longest', 'найдовше'], ['last', 'останнє']]} />
+                  <Segmented label="Як виділяти" value={capt.accentStyle} onChange={(accentStyle) => setCap({ accentStyle })}
+                    options={[['color', 'колір'], ['font', 'інший шрифт'], ['big', 'великим'], ['box', 'бокс'], ['marker', 'маркер'], ['glow', 'світіння']]} />
+                  <Toggle label="Два яруси (ключове слово окремим рядком)" value={capt.tiers} onChange={(tiers) => setCap({ tiers })} />
+                  {(capt.accentStyle === 'font' || capt.accentStyle === 'big' || capt.accentStyle === 'box') && (
+                    <Row label="Шрифт акценту">
+                      <select value={capt.accentFont ?? ''} onChange={(e) => setCap({ accentFont: e.target.value || null })}>
+                        <option value="">той самий</option>
+                        {fonts.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                      </select>
+                    </Row>
+                  )}
+                  <Slider label="Розмір акценту" value={capt.accentScale} min={0.5} max={3} step={0.05} onChange={(accentScale) => setCap({ accentScale })} fmt={(v) => `×${v.toFixed(2)}`} />
+                  <Segmented label="Регістр акценту" value={capt.accentUpper} onChange={(accentUpper) => setCap({ accentUpper })} options={[['same', 'як усе'], ['upper', 'ВЕЛИКІ'], ['lower', 'малі']]} />
+                  <Toggle label="Акцент курсивом" value={capt.accentItalic} onChange={(accentItalic) => setCap({ accentItalic })} />
+                  <Swatches label="Колір акценту" value={capt.accent} colors={PALETTE} onChange={(accent) => setCap({ accent })} />
+                  {(capt.accentStyle === 'box' || capt.accentStyle === 'marker') && (
+                    <>
+                      <Swatches label="Колір боксу" value={capt.boxColor} colors={PALETTE} onChange={(boxColor) => setCap({ boxColor })} />
+                      <Swatches label="Текст у боксі" value={capt.accentInk} colors={PALETTE} onChange={(accentInk) => setCap({ accentInk })} />
+                    </>
+                  )}
                 </Section>
                 <Section title="Кольори">
                   <Swatches label="Текст" value={capt.color} colors={PALETTE} onChange={(color) => setCap({ color, gradient: null })} />
-                  <Swatches label="Акцент / виділення" value={capt.activeColor} colors={PALETTE} onChange={(v) => setCap({ activeColor: v, accent: v })} />
+                  <Swatches label="Сказане слово" value={capt.activeColor} colors={PALETTE} onChange={(v) => setCap({ activeColor: v })} />
+                  {capt.wordMode === 'karaoke' && <Swatches label="Ще не сказані" value={capt.futureColor} colors={PALETTE} onChange={(futureColor) => setCap({ futureColor })} />}
                   {(capt.wordMode === 'box' || capt.wordMode === 'marker' || capt.wordMode === 'underline') && <Swatches label="Плашка слова" value={capt.boxColor} colors={PALETTE} onChange={(boxColor) => setCap({ boxColor })} />}
-                  <Segmented label="Фон" value={capt.bg} onChange={(bg) => setCap({ bg })} options={[['none', 'без'], ['plate', 'плашка'], ['line-plates', 'по рядках'], ['glass', 'скло']]} />
+                  <Segmented label="Фон" value={capt.bg} onChange={(bg) => setCap({ bg })} options={[['none', 'без'], ['plate', 'плашка'], ['line-plates', 'по рядках'], ['word-tags', 'теги'], ['glass', 'скло'], ['brush', 'пензель']]} />
                   {capt.bg !== 'none' && (
                     <>
                       <Swatches label="Колір фону" value={capt.bgColor} colors={PALETTE} onChange={(bgColor) => setCap({ bgColor })} />
@@ -219,38 +272,80 @@ export const Editor: React.FC<{ id: string }> = ({ id }) => {
                   <Slider label="Світіння" value={capt.glow} min={0} max={40} onChange={(glow) => setCap({ glow })} />
                 </Section>
                 <Section title="Положення">
-                  <Slider label="Висота" value={capt.y} min={0.1} max={0.92} step={0.005} onChange={(y) => setCap({ y })} fmt={(v) => `${Math.round(v * 1920)} px`} />
+                  <Slider label="Висота" value={capt.y} min={0.08} max={0.92} step={0.005} onChange={(y) => setCap({ y })} fmt={(v) => `${Math.round(v * 1920)} px`} />
+                  <Segmented label="Вирівнювання" value={capt.align} onChange={(align) => setCap({ align, x: align === 'left' ? 0.08 : align === 'right' ? 0.92 : 0.5 })} options={[['left', 'ліворуч'], ['center', 'по центру'], ['right', 'праворуч']]} />
+                  <Slider label="Зсув по горизонталі" value={capt.x} min={0} max={1} step={0.005} onChange={(x) => setCap({ x })} fmt={(v) => `${Math.round(v * 1080)} px`} />
+                  <Slider label="Нахил" value={capt.rotate} min={-15} max={15} step={0.5} onChange={(rotate) => setCap({ rotate })} fmt={(v) => `${v}°`} />
                   <div className="muted small">Або тягни білу ручку зліва від відео.</div>
+                </Section>
+              </>
+            )}
+
+            {tab === 'fx' && (
+              <>
+                <Section title="Переходи на склейках" right={<span className="muted small">наведи — побачиш склейку</span>}>
+                  {grid(CUT_PRESETS, (s, v) => ({ ...s, fx: { ...s.fx, ...v } }), (s) => s.fx.cut, cutFrame)}
+                  <Slider label="Сила переходу" value={fxs.cutStrength} min={0.1} max={1} step={0.05} onChange={(cutStrength) => setFx({ cutStrength })} fmt={(v) => `${Math.round(v * 100)}%`} />
+                </Section>
+                <Section title="Ключові слова">
+                  <Slider label="Наїзд на ключове слово" value={project.style.camera.accentPunch ?? 0} min={0} max={0.25} step={0.01} onChange={(accentPunch) => setStyle((s) => ({ ...s, camera: { ...s.camera, accentPunch } }))} fmt={(v) => (v ? `+${Math.round(v * 100)}%` : 'вимк.')} />
+                  <Toggle label="Тряска на ключовому слові" value={fxs.shakeOnAccent} onChange={(shakeOnAccent) => setFx({ shakeOnAccent })} />
+                  <div className="muted small">Ключові слова — ★ у «Текст і склейки» або автовибір у «Субтитрах».</div>
+                </Section>
+                <Section title="Кадр і фон">
+                  {grid(FRAME_PRESETS, (s, v) => ({ ...s, fx: { ...s.fx, ...v } }), (s) => [s.fx.frame, s.fx.letterbox, s.fx.framePattern, s.fx.frameBg])}
+                  {fxs.frame !== 'full' && (
+                    <>
+                      <Swatches label="Фон" value={fxs.frameBg} colors={BG_PALETTE} onChange={(frameBg) => setFx({ frameBg })} />
+                      <Swatches label="Візерунок / другий колір" value={fxs.frameBg2} colors={BG_PALETTE} onChange={(frameBg2) => setFx({ frameBg2 })} />
+                      <Segmented label="Візерунок" value={fxs.framePattern} onChange={(framePattern) => setFx({ framePattern })} options={[['plain', 'однотон'], ['dots', 'крапки'], ['grid', 'клітинка'], ['gradient', 'градієнт'], ['paper', 'папір']]} />
+                    </>
+                  )}
+                  <Slider label="Кіно-смуги" value={fxs.letterbox} min={0} max={0.18} step={0.005} onChange={(letterbox) => setFx({ letterbox })} fmt={(v) => (v ? `${Math.round(v * 1920)} px` : 'вимк.')} />
+                </Section>
+                <Section title="Заголовок" right={<Toggle label="" value={hl.enabled} onChange={(enabled) => setHl({ enabled })} />}>
+                  <Row label="Текст"><textarea rows={2} value={hl.text} placeholder="Напр.: 3 ПОМИЛКИ В REELS" onChange={(e) => setHl({ text: e.target.value, enabled: true })} /></Row>
+                  <Row label="Підрядок / номер"><input value={hl.kicker} placeholder="необов’язково" onChange={(e) => setHl({ kicker: e.target.value })} /></Row>
+                  <Row label="Вигляд">
+                    <select value={hl.style} onChange={(e) => setHl({ style: e.target.value as HeadlineStyle['style'] })}>
+                      {HEADLINE_STYLES.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+                    </select>
+                  </Row>
+                  <Slider label="Висота (верхній край)" value={hl.y} min={0.06} max={0.9} step={0.005} onChange={(y) => setHl({ y })} fmt={(v) => `${Math.round(v * 1920)} px`} />
+                  <Slider label="Скільки тримати" value={hl.until} min={0} max={30} step={0.5} onChange={(until) => setHl({ until })} fmt={(v) => (v ? `${v} с` : 'весь ролик')} />
                 </Section>
               </>
             )}
 
             {tab === 'color' && (
               <>
-                <Section title="Кольорові пресети">{grid(COLOR_PRESETS, (s, v) => ({ ...s, color: v }), (s) => s.color)}</Section>
-                <Section title="Тонке налаштування">
-                  <Slider label="Яскравість" value={col.brightness} min={0.6} max={1.4} step={0.01} onChange={(brightness) => setCol({ brightness })} fmt={(v) => v.toFixed(2)} />
-                  <Slider label="Контраст" value={col.contrast} min={0.6} max={1.6} step={0.01} onChange={(contrast) => setCol({ contrast })} fmt={(v) => v.toFixed(2)} />
-                  <Slider label="Насиченість" value={col.saturation} min={0} max={2} step={0.01} onChange={(saturation) => setCol({ saturation })} fmt={(v) => v.toFixed(2)} />
-                  <Slider label="Тепло ↔ холод" value={col.warmth} min={-1} max={1} step={0.01} onChange={(warmth) => setCol({ warmth })} fmt={(v) => v.toFixed(2)} />
-                  <Slider label="Підняті тіні" value={col.fade} min={0} max={0.4} step={0.01} onChange={(fade) => setCol({ fade })} fmt={(v) => v.toFixed(2)} />
-                  <Slider label="Віньєтка" value={col.vignette} min={0} max={1} step={0.01} onChange={(vignette) => setCol({ vignette })} fmt={(v) => v.toFixed(2)} />
-                  <Slider label="Зерно плівки" value={col.grain} min={0} max={1} step={0.01} onChange={(grain) => setCol({ grain })} fmt={(v) => v.toFixed(2)} />
+                <Section title="Фільтр" right={<button className={`ghost ${before ? 'on' : ''}`} onPointerDown={() => setBefore(true)} onPointerUp={() => setBefore(false)} onPointerLeave={() => setBefore(false)}>утримуй — до/після</button>}>
+                  {grid(COLOR_FILTERS.map((f) => ({ id: f.id, name: f.name, value: f.id })), (s, v) => ({ ...s, color: { ...s.color, filter: v, intensity: s.color.filter === v ? s.color.intensity : 1 } }), (s) => s.color.filter)}
+                  <Slider label="Сила фільтра" value={col.intensity} min={0} max={1} step={0.01} onChange={(intensity) => setCol({ intensity })} fmt={(v) => `${Math.round(v * 100)}%`} />
+                </Section>
+                <Section title="Налаштування" right={<button className="ghost" onClick={() => setCol({ ...ZERO_ADJUST })}>скинути все</button>}>
+                  {ADJUST_KEYS.map((key) => (
+                    <div key={key} onDoubleClick={() => setCol({ [key]: 0 } as Partial<ColorStyle>)} title="Подвійний клік — скинути">
+                      <Slider label={ADJUST_UI[key].label} value={col[key]} min={ADJUST_UI[key].min} max={ADJUST_UI[key].max} step={0.01} onChange={(v) => setCol({ [key]: v } as Partial<ColorStyle>)} fmt={pct} />
+                    </div>
+                  ))}
+                  <div className="muted small">Колір не залежить від стилю монтажу: перемикай «Стилі», а кольорокорекція лишається твоя. Подвійний клік по повзунку повертає 0.</div>
                 </Section>
               </>
             )}
 
             {tab === 'camera' && (
               <>
-                <Section title="Рух камери">{grid(CAMERA_PRESETS, (s, v) => ({ ...s, camera: { ...v, focusY: s.camera.focusY } }), (s) => s.camera.mode)}</Section>
+                <Section title="Рух камери">{grid(CAMERA_PRESETS, (s, v) => ({ ...s, camera: { ...v, focusY: s.camera.focusY } }), (s) => [s.camera.mode, s.camera.accentPunch ?? 0])}</Section>
                 <Section title="Налаштування">
                   <Slider label="Сила наїзду" value={project.style.camera.amount} min={0} max={0.3} step={0.01} onChange={(amount) => setStyle((s) => ({ ...s, camera: { ...s.camera, amount } }))} fmt={(v) => `${Math.round(v * 100)}%`} />
+                  <Slider label="Наїзд на ключові слова" value={project.style.camera.accentPunch ?? 0} min={0} max={0.25} step={0.01} onChange={(accentPunch) => setStyle((s) => ({ ...s, camera: { ...s.camera, accentPunch } }))} fmt={(v) => (v ? `+${Math.round(v * 100)}%` : 'вимк.')} />
                   <Slider label="Точка фокусу (обличчя)" value={project.style.camera.focusY} min={0} max={1} step={0.01} onChange={(focusY) => setStyle((s) => ({ ...s, camera: { ...s.camera, focusY } }))} fmt={(v) => `${Math.round(v * 100)}%`} />
                 </Section>
               </>
             )}
 
-            {tab === 'music' && <MusicPanel project={project} setStyle={setStyle} onUploaded={(p) => setProject((o) => (o ? { ...o, style: p.style } : o))} />}
+            {tab === 'music' && <MusicPanel project={project} setStyle={setStyle} onUploaded={(p) => setProject((o) => (o ? { ...o, style: normalizeStyle(p.style) } : o))} />}
             {tab === 'text' && <TextPanel project={project} update={update} seek={seekSrc} />}
             {tab === 'export' && <ExportPanel project={project} onDone={(p) => setProject((o) => (o ? { ...o, exports: p.exports } : o))} />}
           </div>
@@ -334,7 +429,13 @@ const TextPanel: React.FC<{ project: Project; update: (p: Partial<Project>) => v
           <select value={project.language} onChange={(e) => update({ language: e.target.value })}>
             {[['uk', 'українська'], ['ru', 'російська'], ['en', 'англійська'], ['pl', 'польська'], ['auto', 'визначити самому']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
-          <button onClick={() => { if (confirm('Розпізнати текст і склейки заново? Ручні правки тексту й склейок буде втрачено, стиль залишиться.')) api.reprocess(project.id, project.language).then(() => window.location.reload()); }}>Розпізнати заново</button>
+          <button onClick={() => { if (confirm('Розпізнати текст і склейки заново? Ручні правки тексту й склейок буде втрачено, стиль залишиться.')) api.patch(project.id, { asrMode: project.asrMode ?? 'fast' }).then(() => api.reprocess(project.id, project.language)).then(() => window.location.reload()); }}>Розпізнати заново</button>
+        </Row>
+        <Row label="Розпізнавання" hint={project.asrSeconds ? ` минулого разу: ${Math.round(project.asrSeconds)} с` : undefined}>
+          <select value={project.asrMode ?? 'fast'} onChange={(e) => update({ asrMode: e.target.value as Project['asrMode'] })}>
+            <option value="fast">швидко — великими шматками + перевірка сумнівних фраз</option>
+            <option value="precise">точно — кожна фраза окремо (у 3–5 разів довше)</option>
+          </select>
         </Row>
         <div className="muted small">Вимкни фразу — вона випаде з ролика. Сірі — автоматично визнані дублями або шумом. Клік на слово — виправити текст або зробити акцентом.</div>
         {w && sel !== null && (

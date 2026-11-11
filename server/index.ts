@@ -43,7 +43,7 @@ app.get('/api/projects/:id', (req, res) => {
 app.patch('/api/projects/:id', (req, res) => {
   const p = store.get(req.params.id);
   if (!p) return void res.status(404).json({ error: 'Немає такого проєкту' });
-  const allowed: (keyof Project)[] = ['name', 'words', 'clips', 'style', 'language'];
+  const allowed: (keyof Project)[] = ['name', 'words', 'clips', 'style', 'language', 'asrMode'];
   for (const k of allowed) if (req.body[k] !== undefined) (p as any)[k] = req.body[k];
   res.json(store.save(p));
 });

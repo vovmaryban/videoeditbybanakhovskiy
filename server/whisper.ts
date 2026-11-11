@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Word } from '../src/remotion/types';
 import { run } from './ffmpeg';
-import { DEFAULT_MODEL, IS_WIN, MODELS_DIR, TOOLS, WHISPER_DIR, WHISPER_VERSION, whisperBinary, whisperModel } from './paths';
+import { DEFAULT_MODEL, IS_WIN, MODELS_DIR, TOOLS, WHISPER_DIR, WHISPER_VERSION, whisperBinary, whisperFastBinary, whisperModel } from './paths';
 
 const download = async (url: string, to: string, label: string) => {
   const res = await fetch(url);
@@ -28,11 +28,11 @@ const download = async (url: string, to: string, label: string) => {
 // Installs whisper.cpp (prebuilt on Windows, built from source elsewhere) and the speech model.
 export const setupWhisper = async () => {
   fs.mkdirSync(MODELS_DIR, { recursive: true });
-  if (!whisperBinary()) {
-    console.log(`Встановлюю whisper.cpp v${WHISPER_VERSION}...`);
+  if (!whisperFastBinary()) {
+    console.log(`Встановлюю whisper.cpp v${WHISPER_VERSION} (OpenBLAS)...`);
     if (IS_WIN) {
-      const zip = path.join(TOOLS, 'whisper-bin-x64.zip');
-      await download(`https://github.com/ggml-org/whisper.cpp/releases/download/v${WHISPER_VERSION}/whisper-bin-x64.zip`, zip, 'whisper.cpp');
+      const zip = path.join(TOOLS, 'whisper-blas-bin-x64.zip');
+      await download(`https://github.com/ggml-org/whisper.cpp/releases/download/v${WHISPER_VERSION}/whisper-blas-bin-x64.zip`, zip, 'whisper.cpp');
       fs.mkdirSync(WHISPER_DIR, { recursive: true });
       await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -Force -LiteralPath '${zip}' -DestinationPath '${WHISPER_DIR}'`], { env: process.env });
       fs.rmSync(zip, { force: true });
