@@ -1,0 +1,38 @@
+{
+  "name": "video-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Локальна студія монтажу вертикальних відео з живим переглядом",
+  "scripts": {
+    "dev": "concurrently -k -n server,ui -c magenta,cyan \"npm:server\" \"npm:ui\"",
+    "server": "tsx watch --clear-screen=false server/index.ts",
+    "ui": "vite",
+    "start": "vite build && tsx server/index.ts --prod",
+    "setup:whisper": "tsx server/setup-whisper.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.540",
+    "@remotion/install-whisper-cpp": "4.0.540",
+    "@remotion/player": "4.0.540",
+    "@remotion/renderer": "4.0.540",
+    "express": "4.21.2",
+    "multer": "2.0.2",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.540"
+  },
+  "devDependencies": {
+    "@types/express": "4.17.23",
+    "@types/multer": "2.0.0",
+    "@types/node": "22.18.0",
+    "@types/react": "19.1.12",
+    "@types/react-dom": "19.1.9",
+    "@vitejs/plugin-react": "5.0.4",
+    "concurrently": "9.2.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vite": "7.1.12"
+  }
+}
